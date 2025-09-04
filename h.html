@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DHIS2 Tableau WDC – All User Info</title>
+  <script src="https://connectors.tableau.com/libs/tableauwdc-2.3.latest.js"></script>
+  <!-- Excel export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; padding:20px; max-width:980px; margin:0 auto }
+    .input-group { margin-bottom:15px }
+    label { display:block; margin-bottom:5px; font-weight:bold }
+    input, button { padding:8px; width:100%; box-sizing:border-box }
+    button { background:#4CAF50; color:#fff; border:none; cursor:pointer; margin:5px 0 }
+    button:hover { background:#45a049 }
+    #submitButton { background:#337ab7 }
+    #results { margin-top:20px; overflow-x:auto; display:none }
+    table { width:100%; border-collapse:collapse }
+    th, td { border:1px solid #ddd; padding:8px; text-align:left }
+    th { background:#f2f2f2 }
+    .status { margin-top:10px; padding:10px; border-radius:4px; display:none }
+    .success { background:#dff0d8; color:#3c763d }
+    .error   { background:#f2dede; color:#a94442 }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px }
+    @media (max-width:640px){ .row { grid-template-columns:1fr } }
+
+    /* Force the downloads bar to be visible regardless of host CSS */
+    #downloads { display:block !important; margin-top:6px }
+    #downloadCsv, #downloadXlsx {
+      background:#6c757d; color:#fff; border:none; padding:10px; width:100%;
+      margin:6px 0; cursor:pointer; display:inline-block !important; visibility:visible !important;
+    }
+    #downloadCsv:disabled, #downloadXlsx:disabled { opacity:.6; cursor:not-allowed }
+  </style>
+</head>
+<body>
+  <div id="interactive">
+    <h1>DHIS2 Data Connector – All User Fields</h1>
+
+    <div class="input-group">
+      <label for="baseUrl">DHIS2 Base URL:</label>
+      <input type="text" id="baseUrl" value="https://hmis.mohcc.org.zw/nhis">
+    </div>
+    <div class="row">
+      <div class="input-group">
+        <label for="username">Username:</label>
+        <input type="text" id="username" value="">
+      </div>
+      <div class="input-group">
+        <label for="password">Password:</label>
+        <input type="password" id="password" value="">
+      </div>
+    </div>
+
+    <button id="fetchButton">Fetch Preview</button>
+    <button id="submitButton">Send to Tableau</button>
+
+    <!-- DOWNLOAD BUTTONS: forced visible -->
+    <div id="downloads">
+      <button id="downloadCsv" disabled>Download CSV</button>
+      <button id="downloadXlsx" disabled>Download Excel (.xlsx)</button>
+    </div>
+
+    <div id="status" class="status"></div>
+
+    <div id="results">
+      <h3>Fetched Data Preview</h3>
+      <table id="dataTable">
+        <thead>
+          <tr>
+            <th>ID</th><th>Username</th><th>First Name</th><th>Last Name</th><th>Display Name</th>
+            <th>Created</th><th>Last Updated</th><th>Gender</th><th>Email</th><th>Phone</th>
+            <th>Job Title</th><th>Org Units</th><th>Roles</th><th>Groups</th><th>Last Login</th><th>Disabled</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    var fetchedData = [];
+    var headerOrder = [
+      "id","username","firstName","surname","displayName","created","lastUpdated",
+      "gender","email","phone","jobTitle","orgUnits","roles","groups","lastLogin","disabled"
+    ];
+
+    // Utils
+    function escapeHtml(s){ if(s==null) return ""; return String(s).replace(/[&<>"']/g,function(m){return({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]);});}
+    function showStatus(msg,type){var st=document.getElementById("status");st.textContent=msg;st.className="status "+(type==="error"?"error":"success");st.style.display="block";}
+    function toggleDownloadButtons(en){document.getElementById("downloadCsv").disabled=!en;document.getElementById("downloadXlsx").disabled=!en;}
+
+    // fetch→XHR fallback
+    function httpGetJson(url, headers){
+      return new Promise(function(resolve,reject){
+        if(window.fetch){
+          fetch(url,{headers:headers||{}}).then(function(r){if(!r.ok) throw new Error("DHIS2 HTTP "+r.status+": "+r.statusText);return r.json();}).then(resolve).catch(reject);
+          return;
+        }
+        var xhr=new XMLHttpRequest(); xhr.open("GET",url,true);
+        if(headers) for(var k in headers) if(headers.hasOwnProperty(k)) xhr.setRequestHeader(k,headers[k]);
+        xhr.onreadystatechange=function(){ if(xhr.readyState!==4) return;
+          if(xhr.status>=200 && xhr.status<300){ try{ resolve(JSON.parse(xhr.responseText)); }catch(e){ reject(e);} }
+          else { reject(new Error("DHIS2 HTTP "+xhr.status+": "+xhr.statusText)); }
+        };
+        xhr.send();
+      });
+    }
+
+    // Fetch & render
+    function fetchDataForWDC(config){
+      config=config||{};
+      var baseUrl  = (config.baseUrl||document.getElementById("baseUrl").value).replace(/\/+$/,"");
+      var username =  config.username||document.getElementById("username").value;
+      var password =  config.password||document.getElementById("password").value;
+
+      var url = baseUrl + "/api/users.json?fields=" +
+        "id,username,firstName,surname,displayName,created,lastUpdated,gender," +
+        "email,phoneNumber,jobTitle," +
+        "organisationUnits[id,name],userRoles[id,name],userGroups[id,name]," +
+        "userCredentials[username,lastLogin,disabled,userRoles[id,name]]&paging=false";
+      var headers={"Authorization":"Basic "+btoa(username+":"+password),"Accept":"application/json"};
+
+      showStatus("Fetching users…","success");
+      return httpGetJson(url,headers).then(function(json){
+        if(!json || !json.users || Object.prototype.toString.call(json.users)!=="[object Array]") throw new Error("Unexpected payload");
+
+        fetchedData = json.users.map(function(u){
+          var orgUnits=(u.organisationUnits||[]).map(function(o){return o&&o.name;}).filter(Boolean).join("; ");
+          var roles   =(u.userRoles||[]).map(function(r){return r&&r.name;}).filter(Boolean).join("; ");
+          var groups  =(u.userGroups||[]).map(function(g){return g&&g.name;}).filter(Boolean).join("; ");
+          var creds   = u.userCredentials||{};
+          return {
+            id:u.id, username:u.username, firstName:u.firstName, surname:u.surname, displayName:u.displayName,
+            created:u.created, lastUpdated:u.lastUpdated, gender:u.gender||"", email:u.email||"", phone:u.phoneNumber||"",
+            jobTitle:u.jobTitle||"", orgUnits:orgUnits, roles:roles, groups:groups, lastLogin:creds.lastLogin||"",
+            disabled:(typeof creds.disabled==="boolean"?creds.disabled:false)
+          };
+        });
+
+        updateTable(fetchedData);
+        document.getElementById("results").style.display="block";
+        toggleDownloadButtons(true);
+        showStatus("Success: "+fetchedData.length+" users.","success");
+        return fetchedData;
+      }).catch(function(err){
+        toggleDownloadButtons(false);
+        document.getElementById("results").style.display="none";
+        showStatus(err.message||String(err),"error");
+        throw err;
+      });
+    }
+
+    function updateTable(rows){
+      var tbody=document.querySelector("#dataTable tbody"); var html="";
+      for(var i=0;i<rows.length;i++){ var r=rows[i];
+        html+="<tr>"+
+          "<td>"+escapeHtml(r.id)+"</td>"+
+          "<td>"+escapeHtml(r.username)+"</td>"+
+          "<td>"+escapeHtml(r.firstName)+"</td>"+
+          "<td>"+escapeHtml(r.surname)+"</td>"+
+          "<td>"+escapeHtml(r.displayName)+"</td>"+
+          "<td>"+escapeHtml(r.created)+"</td>"+
+          "<td>"+escapeHtml(r.lastUpdated)+"</td>"+
+          "<td>"+escapeHtml(r.gender)+"</td>"+
+          "<td>"+escapeHtml(r.email)+"</td>"+
+          "<td>"+escapeHtml(r.phone)+"</td>"+
+          "<td>"+escapeHtml(r.jobTitle)+"</td>"+
+          "<td>"+escapeHtml(r.orgUnits)+"</td>"+
+          "<td>"+escapeHtml(r.roles)+"</td>"+
+          "<td>"+escapeHtml(r.groups)+"</td>"+
+          "<td>"+escapeHtml(r.lastLogin)+"</td>"+
+          "<td>"+(r.disabled?"true":"false")+"</td>"+
+        "</tr>";
+      }
+      tbody.innerHTML=html;
+    }
+
+    // Downloads
+    function toCsv(rows){
+      function q(v){ var s=(v==null)?"":String(v); return /[",\n]/.test(s)?('"'+s.replace(/"/g,'""')+'"'):s; }
+      var header=headerOrder.join(","), body=rows.map(function(r){return headerOrder.map(function(k){return q(r[k]);}).join(",");}).join("\n");
+      return header+"\n"+body;
+    }
+    function downloadBlob(content,mime,filename){
+      var blob=new Blob([content],{type:mime}); var url=URL.createObjectURL(blob);
+      var a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    }
+    function downloadCsv(){ if(!fetchedData.length) return showStatus("No data to export.","error"); downloadBlob(toCsv(fetchedData),"text/csv;charset=utf-8;","dhis2_users.csv"); }
+    function downloadXlsx(){
+      if(!fetchedData.length) return showStatus("No data to export.","error");
+      if(typeof XLSX==="undefined"){ showStatus("XLSX library not loaded.","error"); return; }
+      var ws=XLSX.utils.json_to_sheet(fetchedData,{header:headerOrder});
+      ws["!cols"]=headerOrder.map(function(h){return {wch:Math.max(h.length,14)};});
+      var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Users"); XLSX.writeFile(wb,"dhis2_users.xlsx");
+    }
+
+    // Tableau WDC glue
+    var connector=tableau.makeConnector();
+    connector.init=function(initCallback){
+      document.getElementById("interactive").style.display="block"; // keep UI visible always
+      var showSubmit=(window.tableau && tableau.phase===tableau.phaseEnum.interactivePhase);
+      document.getElementById("submitButton").style.display=showSubmit?"inline-block":"none"; // only toggle submit
+      initCallback();
+    };
+    connector.getSchema=function(schemaCallback){
+      var cols=[
+        {id:"id",alias:"ID",dataType:tableau.dataTypeEnum.string},
+        {id:"username",alias:"Username",dataType:tableau.dataTypeEnum.string},
+        {id:"firstName",alias:"First Name",dataType:tableau.dataTypeEnum.string},
+        {id:"surname",alias:"Last Name",dataType:tableau.dataTypeEnum.string},
+        {id:"displayName",alias:"Display Name",dataType:tableau.dataTypeEnum.string},
+        {id:"created",alias:"Created",dataType:tableau.dataTypeEnum.datetime},
+        {id:"lastUpdated",alias:"Last Updated",dataType:tableau.dataTypeEnum.datetime},
+        {id:"gender",alias:"Gender",dataType:tableau.dataTypeEnum.string},
+        {id:"email",alias:"Email",dataType:tableau.dataTypeEnum.string},
+        {id:"phone",alias:"Phone",dataType:tableau.dataTypeEnum.string},
+        {id:"jobTitle",alias:"Job Title",dataType:tableau.dataTypeEnum.string},
+        {id:"orgUnits",alias:"Org Units",dataType:tableau.dataTypeEnum.string},
+        {id:"roles",alias:"Roles",dataType:tableau.dataTypeEnum.string},
+        {id:"groups",alias:"Groups",dataType:tableau.dataTypeEnum.string},
+        {id:"lastLogin",alias:"Last Login",dataType:tableau.dataTypeEnum.datetime},
+        {id:"disabled",alias:"Disabled",dataType:tableau.dataTypeEnum.bool}
+      ];
+      schemaCallback([{id:"DHIS2Users",columns:cols}]);
+    };
+    connector.getData=function(table,done){
+      var cfg={}; try{cfg=JSON.parse(tableau.connectionData||"{}");}catch(e){cfg={};}
+      fetchDataForWDC(cfg).then(function(rows){table.appendRows(rows); done();})
+        .catch(function(err){ tableau.abortWithError(err && err.message ? err.message : String(err)); });
+    };
+    tableau.registerConnector(connector);
+
+    // Wire UI
+    document.getElementById("fetchButton").addEventListener("click", function(){ fetchDataForWDC(); });
+    document.getElementById("submitButton").addEventListener("click", function(){
+      var cfg={ baseUrl:document.getElementById("baseUrl").value, username:document.getElementById("username").value, password:document.getElementById("password").value };
+      tableau.connectionData=JSON.stringify(cfg); tableau.connectionName="DHIS2 – All User Info"; tableau.submit();
+    });
+    document.getElementById("downloadCsv").addEventListener("click", downloadCsv);
+    document.getElementById("downloadXlsx").addEventListener("click", downloadXlsx);
+
+    // As a safety net, force-show the downloads bar after DOM is ready
+    document.addEventListener("DOMContentLoaded", function(){
+      var dl=document.getElementById("downloads");
+      if(dl) dl.style.display="block";
+    });
+  })();
+  </script>
+</body>
+</html>
