@@ -91,22 +91,75 @@
     function showStatus(msg,type){var st=document.getElementById("status");st.textContent=msg;st.className="status "+(type==="error"?"error":"success");st.style.display="block";}
     function toggleDownloadButtons(en){document.getElementById("downloadCsv").disabled=!en;document.getElementById("downloadXlsx").disabled=!en;}
 
-    // fetch→XHR fallback
-    function httpGetJson(url, headers){
-      return new Promise(function(resolve,reject){
-        if(window.fetch){
-          fetch(url,{headers:headers||{}}).then(function(r){if(!r.ok) throw new Error("DHIS2 HTTP "+r.status+": "+r.statusText);return r.json();}).then(resolve).catch(reject);
-          return;
+  
+    // fetch→XHR fallback with rich diagnostics
+function httpGetJson(url, headers) {
+  return new Promise(function (resolve, reject) {
+    if (window.fetch) {
+      fetch(url, {
+        method: "GET",
+        mode: "cors",                 // make intent explicit
+        redirect: "manual",           // catch login redirects
+        cache: "no-store",
+        headers: headers || {}
+        // NOTE: don't add credentials: "include" unless you're relying on DHIS2 cookies
+      })
+      .then(async (r) => {
+        // Read body *even on errors* to surface server messages
+        const ct = r.headers.get("content-type") || "";
+        const bodyText = await r.text().catch(() => "");
+        const brief = bodyText.slice(0, 500);
+
+        // Helpful messages for the common cases
+        if (r.type === "opaque") {
+          throw new Error("Opaque response (CORS blocked). Check CORS on DHIS2 and preflight/headers.");
         }
-        var xhr=new XMLHttpRequest(); xhr.open("GET",url,true);
-        if(headers) for(var k in headers) if(headers.hasOwnProperty(k)) xhr.setRequestHeader(k,headers[k]);
-        xhr.onreadystatechange=function(){ if(xhr.readyState!==4) return;
-          if(xhr.status>=200 && xhr.status<300){ try{ resolve(JSON.parse(xhr.responseText)); }catch(e){ reject(e);} }
-          else { reject(new Error("DHIS2 HTTP "+xhr.status+": "+xhr.statusText)); }
-        };
-        xhr.send();
-      });
+        if (r.status === 0) {
+          throw new Error("Network error (possible mixed content, DNS, or blocked request).");
+        }
+        if (r.status === 401) {
+          throw new Error("401 Unauthorized. DHIS2 rejected your Authorization header (or it wasn’t sent due to CORS). " +
+                          "Verify username/password, and that the server allows the Authorization header in CORS.");
+        }
+        if (r.status === 403) {
+          throw new Error("403 Forbidden. Authenticated but not authorized to read /api/users on this instance.");
+        }
+        if (r.status >= 300 && r.status < 400) {
+          throw new Error(`Redirect (${r.status}). Likely redirect to login on preflight/fetch; CORS must allow OPTIONS w/o auth. Body: ${brief}`);
+        }
+        if (!r.ok) {
+          throw new Error(`HTTP ${r.status} ${r.statusText}. Body: ${brief}`);
+        }
+
+        if (ct.includes("application/json")) {
+          try { return JSON.parse(bodyText); }
+          catch (e) { throw new Error("JSON parse failed: " + e.message + " — " + brief); }
+        } else {
+          throw new Error("Unexpected content-type: " + ct + " — " + brief);
+        }
+      })
+      .then(resolve)
+      .catch(reject);
+      return;
     }
+
+    // XHR fallback (same CORS rules still apply)
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url, true);
+    if (headers) for (var k in headers) if (headers.hasOwnProperty(k)) xhr.setRequestHeader(k, headers[k]);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch (e) { reject(e); }
+      } else {
+        reject(new Error("DHIS2 HTTP " + xhr.status + ": " + xhr.statusText + " — " + xhr.responseText.slice(0, 500)));
+      }
+    };
+    xhr.send();
+  });
+}
+
 
     // Fetch & render
     function fetchDataForWDC(config){
